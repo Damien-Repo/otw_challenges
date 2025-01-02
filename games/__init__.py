@@ -1,4 +1,3 @@
-
 import os
 import json
 import re
@@ -44,7 +43,7 @@ class Game():
             try:
                 passwd = challenge.run()
                 assert passwd is not None, 'Password not found'
-                assert re.match('[a-zA-Z0-9]{32}', passwd), 'Password is not valid'
+                assert re.match(challenge.PASSWD_PATTERN, passwd), f'Password "{passwd}" is not valid (expected pattern: {challenge.PASSWD_PATTERN})'
 
                 self._credentials[next_challenge_name] = passwd
 
@@ -65,6 +64,10 @@ class Game():
         return True
 
     def run_all_challenges(self):
+        print('\n###########################################################')
+        print(f'### Starting game: {self._name.upper()}{" " * (36 - len(self._name))} ###')
+        print('###########################################################')
+
         for i in range(0, self.CHALLENGES_COUNT_MAX):
             challenge_module_name = f'{self._name.capitalize()}_{i:02}'
 

